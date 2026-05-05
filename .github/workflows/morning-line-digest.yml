@@ -1,10 +1,6 @@
 name: Morning LINE stock digest
 
 on:
-  push:
-    branches: ["main"]
-    paths-ignore:
-      - "public/**"
   schedule:
     # GitHub cron uses UTC. 00:00 UTC is 08:00 in Asia/Taipei.
     - cron: "0 0 * * 1-6"
