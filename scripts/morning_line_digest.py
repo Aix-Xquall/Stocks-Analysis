@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import datetime as dt
+import email.utils
 import os
 import subprocess
 import sys
@@ -27,6 +28,27 @@ YAHOO_QUOTE_URLS = (
     "https://query2.finance.yahoo.com/v7/finance/quote",
 )
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+
+NEWS_KEYWORDS = (
+    "eps",
+    "esp",
+    "earnings",
+    "earning",
+    "revenue",
+    "sales",
+    "outlook",
+    "guidance",
+    "forecast",
+    "results",
+    "profit",
+    "財報",
+    "營收",
+    "展望",
+    "財測",
+    "法說",
+    "獲利",
+    "每股盈餘",
+)
 
 US_STOCKS = [
     {"symbol": "NVDA", "name": "Nvidia", "yahoo": "NVDA"},
@@ -64,6 +86,7 @@ class NewsItem:
     link: str
     source: str
     published: str
+    short_link: str = ""
 
 
 def http_session() -> requests.Session:
@@ -241,7 +264,7 @@ def google_news_url(query: str, locale: str) -> str:
     return "https://news.google.com/rss/search?" + urllib.parse.urlencode(params)
 
 
-def fetch_google_news(query: str, locale: str, limit: int = 1) -> list[NewsItem]:
+def fetch_google_news(query: str, locale: str, limit: int = 8) -> list[NewsItem]:
     try:
         response = SESSION.get(google_news_url(query, locale), timeout=20)
         response.raise_for_status()
@@ -266,13 +289,87 @@ def fetch_google_news(query: str, locale: str, limit: int = 1) -> list[NewsItem]
     return items
 
 
+def parse_news_datetime(value: str) -> dt.datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def is_relevant_news(item: NewsItem) -> bool:
+    title = item.title.lower()
+    return any(keyword.lower() in title for keyword in NEWS_KEYWORDS)
+
+
+def filter_recent_relevant_news(
+    items: list[NewsItem],
+    *,
+    lookback_days: int,
+    now_utc: dt.datetime,
+    max_items: int,
+) -> list[NewsItem]:
+    cutoff = now_utc - dt.timedelta(days=lookback_days)
+    selected: list[NewsItem] = []
+    seen_links: set[str] = set()
+    for item in items:
+        published = parse_news_datetime(item.published)
+        if published is None or published < cutoff:
+            continue
+        if not is_relevant_news(item):
+            continue
+        if item.link in seen_links:
+            continue
+        seen_links.add(item.link)
+        selected.append(item)
+        if len(selected) >= max_items:
+            break
+    return selected
+
+
+def shorten_url(url: str) -> str:
+    if not url or not bool_env("SHORTEN_NEWS_LINKS", True):
+        return url
+    try:
+        response = SESSION.get(
+            "https://tinyurl.com/api-create.php",
+            params={"url": url},
+            timeout=8,
+        )
+        response.raise_for_status()
+        short_url = response.text.strip()
+    except Exception as exc:  # noqa: BLE001 - link shortening must not block sending
+        print(f"WARNING: URL shortening failed: {exc}", file=sys.stderr)
+        return url
+    if short_url.startswith(("http://", "https://")):
+        return short_url
+    return url
+
+
+def attach_short_links(news: dict[str, list[NewsItem]]) -> None:
+    items = [item for bucket in news.values() for item in bucket if item.link]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        future_map = {executor.submit(shorten_url, item.link): item for item in items}
+        for future in concurrent.futures.as_completed(future_map):
+            item = future_map[future]
+            try:
+                item.short_link = future.result()
+            except Exception as exc:  # noqa: BLE001 - should not happen; keep original URL
+                print(f"WARNING: URL shortening task failed: {exc}", file=sys.stderr)
+                item.short_link = item.link
+
+
 def collect_news(lookback_days: int = 2) -> dict[str, list[NewsItem]]:
     queries: dict[str, tuple[str, str]] = {}
     for stock in US_STOCKS:
         queries[stock["symbol"]] = (
             (
                 f'"{stock["symbol"]}" "{stock["name"]}" '
-                f"(earnings OR revenue OR outlook OR EPS OR guidance OR stock) "
+                f"(ESP OR EPS OR earnings OR revenue OR outlook OR guidance) "
                 f"when:{lookback_days}d"
             ),
             "us",
@@ -282,25 +379,33 @@ def collect_news(lookback_days: int = 2) -> dict[str, list[NewsItem]]:
         queries[stock["symbol"]] = (
             (
                 f'"{stock["name"]}" {plain_symbol} '
-                f"(營收 OR EPS OR 財報 OR 展望 OR 法說 OR 重大新聞) "
+                f"(ESP OR EPS OR 營收 OR 財報 OR 展望 OR 財測 OR 法說) "
                 f"when:{lookback_days}d"
             ),
             "tw",
         )
 
     news: dict[str, list[NewsItem]] = {}
+    max_items = int(os.environ.get("NEWS_PER_STOCK", "2"))
+    now_utc = dt.datetime.now(UTC)
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         future_map = {
-            executor.submit(fetch_google_news, query, locale, 1): symbol
+            executor.submit(fetch_google_news, query, locale, 8): symbol
             for symbol, (query, locale) in queries.items()
         }
         for future in concurrent.futures.as_completed(future_map):
             symbol = future_map[future]
             try:
-                news[symbol] = future.result()
+                news[symbol] = filter_recent_relevant_news(
+                    future.result(),
+                    lookback_days=lookback_days,
+                    now_utc=now_utc,
+                    max_items=max_items,
+                )
             except Exception as exc:  # noqa: BLE001 - keep the digest moving
                 print(f"WARNING: News task failed for {symbol}: {exc}", file=sys.stderr)
                 news[symbol] = []
+    attach_short_links(news)
     return news
 
 
@@ -541,63 +646,18 @@ def build_flex_message(quotes: dict[str, dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def eps_text(quote: dict[str, Any]) -> str:
-    parts = []
-    eps_ttm = to_float(quote.get("epsTrailingTwelveMonths"))
-    eps_forward = to_float(quote.get("epsForward"))
-    if eps_ttm is not None:
-        parts.append(f"EPS TTM {eps_ttm:.2f}")
-    if eps_forward is not None:
-        parts.append(f"forward {eps_forward:.2f}")
-    if not parts:
-        parts.append("EPS/ESP 未見公開更新")
-    return " / ".join(parts)
+def stock_news_lines(stock: dict[str, str], news: dict[str, list[NewsItem]]) -> list[str]:
+    items = news.get(stock["symbol"]) or news.get(stock["yahoo"]) or []
+    if not items:
+        return []
 
-
-def stock_digest_lines(
-    stocks: list[dict[str, str]],
-    quotes: dict[str, dict[str, Any]],
-    news: dict[str, list[NewsItem]],
-) -> list[str]:
-    lines: list[str] = []
-    for stock in stocks:
-        quote = quotes.get(stock["yahoo"], {})
-        price = quote_price(quote)
-        change = quote_change(quote)
-        pct = quote.get("regularMarketChangePercent")
-        currency = quote.get("currency", "USD")
-        quote_line = (
-            f"{stock['symbol']} {stock['name']}: {currency} {fmt_num(price)} "
-            f"{fmt_num(change, sign=True)} ({fmt_pct(pct)}), {eps_text(quote)}"
-        )
-        lines.append(quote_line)
-
-        item = (news.get(stock["symbol"]) or news.get(stock["yahoo"]) or [None])[0]
-        if item:
-            source = f" - {item.source}" if item.source else ""
-            lines.append(f"新聞: {short_text(item.title, 74)}{source}\n{item.link}")
-        else:
-            lines.append("新聞: 未見重大更新")
+    lines = [f"{stock['symbol']} {stock['name']}"]
+    for item in items:
+        source = f" - {item.source}" if item.source else ""
+        link = item.short_link or item.link
+        lines.append(f"- {short_text(item.title, 84)}{source}")
+        lines.append(link)
     return lines
-
-
-def stock_quote_line(stock: dict[str, str], quote: dict[str, Any]) -> str:
-    price = quote_price(quote)
-    change = quote_change(quote)
-    pct = quote.get("regularMarketChangePercent")
-    currency = quote.get("currency", "USD")
-    return (
-        f"{stock['symbol']} {stock['name']}: {currency} {fmt_num(price)} "
-        f"{fmt_num(change, sign=True)} ({fmt_pct(pct)}), {eps_text(quote)}"
-    )
-
-
-def stock_news_line(stock: dict[str, str], news: dict[str, list[NewsItem]]) -> str:
-    item = (news.get(stock["symbol"]) or news.get(stock["yahoo"]) or [None])[0]
-    if not item:
-        return "新聞: 未見重大更新"
-    source = f" - {item.source}" if item.source else ""
-    return f"新聞: {short_text(item.title, 62)}{source}\n{item.link}"
 
 
 def build_text_digest(
@@ -607,19 +667,13 @@ def build_text_digest(
     display_limit: int,
 ) -> str:
     today = now_taipei().strftime("%Y-%m-%d")
-    us_quotes = [quotes.get(stock["yahoo"], {}) for stock in US_STOCKS]
-    ups = sum(1 for quote in us_quotes if quote_change(quote) > 0)
-    downs = sum(1 for quote in us_quotes if quote_change(quote) < 0)
-    flat = len(US_STOCKS) - ups - downs
-
     footer = f"本月LINE訊息: {estimated_usage_after_send} / {display_limit}"
     lines = [
-        f"美台股晨間摘要 {today}",
-        f"美股快照: 上漲 {ups} / 下跌 {downs} / 持平 {flat}",
-        "重點: 股價漲跌、EPS/ESP、營收、展望與重大新聞連結。",
+        f"ESP/營收/展望新聞 {today}",
+        "範圍: 最近2天內相關新聞；無符合條件的股票已省略。",
         "",
-        "【美股】",
     ]
+    added_any = False
 
     def can_add(line: str) -> bool:
         candidate = "\n".join([*lines, line, "", footer])
@@ -630,17 +684,25 @@ def build_text_digest(
             lines.append(line)
 
     def add_stock_group(stocks: list[dict[str, str]]) -> None:
+        nonlocal added_any
+        group_started = False
         for stock in stocks:
-            quote = quotes.get(stock["yahoo"], {})
-            add_line(stock_quote_line(stock, quote))
-            if not can_add(stock_news_line(stock, news)):
-                add_line("新聞: 空間不足，略過連結")
-            else:
-                add_line(stock_news_line(stock, news))
+            stock_lines = stock_news_lines(stock, news)
+            if not stock_lines:
+                continue
+            if not group_started:
+                add_line("【美股】" if stocks is US_STOCKS else "【台股】")
+                group_started = True
+            for line in stock_lines:
+                add_line(line)
+            added_any = True
 
     add_stock_group(US_STOCKS)
-    lines.extend(["", "【台股】"])
+    if any(news.get(stock["symbol"]) or news.get(stock["yahoo"]) for stock in US_STOCKS):
+        lines.append("")
     add_stock_group(TW_STOCKS)
+    if not added_any:
+        lines.append("近2天未見 ESP/EPS、營收、展望相關新聞。")
     lines.extend(["", footer])
     return "\n".join(lines)[:5000]
 
