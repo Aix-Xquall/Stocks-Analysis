@@ -4,6 +4,7 @@ import concurrent.futures
 import datetime as dt
 import email.utils
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -51,14 +52,14 @@ NEWS_KEYWORDS = (
 )
 
 US_STOCKS = [
-    {"symbol": "NVDA", "name": "Nvidia", "yahoo": "NVDA"},
-    {"symbol": "TSM", "name": "TSMC ADR", "yahoo": "TSM"},
-    {"symbol": "MU", "name": "Micron", "yahoo": "MU"},
-    {"symbol": "GOOGL", "name": "Alphabet", "yahoo": "GOOGL"},
-    {"symbol": "AVGO", "name": "Broadcom", "yahoo": "AVGO"},
-    {"symbol": "ORCL", "name": "Oracle", "yahoo": "ORCL"},
-    {"symbol": "TSLA", "name": "Tesla", "yahoo": "TSLA"},
-    {"symbol": "META", "name": "Meta", "yahoo": "META"},
+    {"symbol": "NVDA", "name": "Nvidia", "zh_name": "輝達", "yahoo": "NVDA"},
+    {"symbol": "TSM", "name": "TSMC ADR", "zh_name": "台積電美國存託憑證", "yahoo": "TSM"},
+    {"symbol": "MU", "name": "Micron", "zh_name": "美光", "yahoo": "MU"},
+    {"symbol": "GOOGL", "name": "Alphabet", "zh_name": "谷歌母公司", "yahoo": "GOOGL"},
+    {"symbol": "AVGO", "name": "Broadcom", "zh_name": "博通", "yahoo": "AVGO"},
+    {"symbol": "ORCL", "name": "Oracle", "zh_name": "甲骨文", "yahoo": "ORCL"},
+    {"symbol": "TSLA", "name": "Tesla", "zh_name": "特斯拉", "yahoo": "TSLA"},
+    {"symbol": "META", "name": "Meta", "zh_name": "臉書母公司", "yahoo": "META"},
 ]
 
 TW_STOCKS = [
@@ -165,6 +166,10 @@ def quote_price(quote: dict[str, Any]) -> float | None:
     return to_float(quote.get("regularMarketPrice"))
 
 
+def quote_five_day_pct(quote: dict[str, Any]) -> float | None:
+    return to_float(quote.get("fiveDayChangePercent"))
+
+
 def market_time_utc(quotes: list[dict[str, Any]]) -> dt.datetime | None:
     timestamps = [
         int(q["regularMarketTime"])
@@ -238,13 +243,14 @@ def fetch_yahoo_chart_quote(symbol: str) -> dict[str, Any]:
         return {}
 
     last_ts, last_close = valid_closes[-1]
-    previous_close = to_float(meta.get("previousClose")) or to_float(meta.get("chartPreviousClose"))
-    if previous_close is None and len(valid_closes) >= 2:
-        previous_close = valid_closes[-2][1]
-    price = to_float(meta.get("regularMarketPrice")) or last_close
+    previous_close = valid_closes[-2][1] if len(valid_closes) >= 2 else None
+    five_day_base = valid_closes[-6][1] if len(valid_closes) >= 6 else valid_closes[0][1]
+    price = last_close
     market_time = int(meta.get("regularMarketTime") or last_ts)
     change = price - previous_close if previous_close else 0.0
     change_pct = (change / previous_close * 100.0) if previous_close else None
+    five_day_change = price - five_day_base if five_day_base else 0.0
+    five_day_change_pct = (five_day_change / five_day_base * 100.0) if five_day_base else None
 
     return {
         "symbol": symbol,
@@ -252,6 +258,8 @@ def fetch_yahoo_chart_quote(symbol: str) -> dict[str, Any]:
         "regularMarketPrice": price,
         "regularMarketChange": change,
         "regularMarketChangePercent": change_pct,
+        "fiveDayChange": five_day_change,
+        "fiveDayChangePercent": five_day_change_pct,
         "regularMarketTime": market_time,
     }
 
@@ -366,13 +374,14 @@ def attach_short_links(news: dict[str, list[NewsItem]]) -> None:
 def collect_news(lookback_days: int = 2) -> dict[str, list[NewsItem]]:
     queries: dict[str, tuple[str, str]] = {}
     for stock in US_STOCKS:
+        zh_name = stock.get("zh_name", stock["name"])
         queries[stock["symbol"]] = (
             (
-                f'"{stock["symbol"]}" "{stock["name"]}" '
-                f"(ESP OR EPS OR earnings OR revenue OR outlook OR guidance) "
+                f'"{stock["symbol"]}" "{stock["name"]}" "{zh_name}" '
+                f"(ESP OR EPS OR 財報 OR 營收 OR 展望 OR 財測 OR 法說 OR earnings OR revenue OR outlook OR guidance) "
                 f"when:{lookback_days}d"
             ),
-            "us",
+            "tw",
         )
     for stock in TW_STOCKS:
         plain_symbol = stock["symbol"].split(".")[0]
@@ -480,7 +489,7 @@ def generate_us_overview_image(
     footer_font = load_font(27)
 
     draw_centered(draw, (width // 2, 22), "美股漲跌概覽", title_font, "#050505")
-    draw_centered(draw, (width // 2, 113), "依最新報價快照", subtitle_font, "#555b63")
+    draw_centered(draw, (width // 2, 113), "依最近交易日收盤", subtitle_font, "#555b63")
 
     headers = [
         ("代碼", 70),
@@ -488,7 +497,7 @@ def generate_us_overview_image(
         ("現價 (USD)", 430),
         ("漲跌 (USD)", 650),
         ("漲跌幅", 820),
-        ("走勢", 1005),
+        ("5日漲幅", 1000),
     ]
     for label, x in headers:
         draw.text((x, 190), label, font=header_font, fill="#111111")
@@ -498,22 +507,33 @@ def generate_us_overview_image(
         quote = quotes.get(stock["yahoo"], {})
         change = quote_change(quote)
         pct = quote.get("regularMarketChangePercent")
+        five_day_pct = quote_five_day_pct(quote)
         price = quote_price(quote)
 
         if change > 0:
             color = "#07843b"
             fill = "#f4fff7"
             border = "#bfecc8"
-            arrow = "↑"
         elif change < 0:
             color = "#c80b12"
             fill = "#fff7f7"
             border = "#ffc0c0"
-            arrow = "↓"
         else:
             color = "#666666"
             fill = "#f8f8f8"
             border = "#d6d6d6"
+
+        if five_day_pct is None:
+            trend_color = "#666666"
+            arrow = "→"
+        elif five_day_pct > 0:
+            trend_color = "#07843b"
+            arrow = "↑"
+        elif five_day_pct < 0:
+            trend_color = "#c80b12"
+            arrow = "↓"
+        else:
+            trend_color = "#666666"
             arrow = "→"
 
         draw.rounded_rectangle(
@@ -528,8 +548,8 @@ def generate_us_overview_image(
         draw.text((415, y + 35), f"USD {fmt_num(price)}", font=body_font, fill="#15191f")
         draw.text((650, y + 35), fmt_num(change, sign=True), font=body_font, fill=color)
         draw.text((820, y + 35), fmt_pct(pct), font=body_font, fill=color)
-        draw.text((978, y + 20), arrow, font=trend_font, fill=color)
-        draw.rounded_rectangle((1045, y + 51, 1115, y + 60), radius=5, fill=color)
+        draw.text((972, y + 20), arrow, font=trend_font, fill=trend_color)
+        draw.text((1034, y + 38), fmt_pct(five_day_pct), font=header_font, fill=trend_color)
 
     utc_time = market_time_utc([quotes.get(s["yahoo"], {}) for s in US_STOCKS])
     time_text = utc_time.strftime("%Y-%m-%d %H:%M UTC") if utc_time else "N/A"
@@ -603,8 +623,10 @@ def build_flex_message(quotes: dict[str, dict[str, Any]]) -> dict[str, Any]:
     for stock in US_STOCKS:
         quote = quotes.get(stock["yahoo"], {})
         change = quote_change(quote)
-        color = "#07843B" if change > 0 else "#C80B12" if change < 0 else "#666666"
-        arrow = "↑" if change > 0 else "↓" if change < 0 else "→"
+        daily_color = "#07843B" if change > 0 else "#C80B12" if change < 0 else "#666666"
+        five_day_pct = quote_five_day_pct(quote)
+        trend_color = "#07843B" if (five_day_pct or 0) > 0 else "#C80B12" if (five_day_pct or 0) < 0 else "#666666"
+        arrow = "↑" if (five_day_pct or 0) > 0 else "↓" if (five_day_pct or 0) < 0 else "→"
         rows.append(
             {
                 "type": "box",
@@ -612,11 +634,11 @@ def build_flex_message(quotes: dict[str, dict[str, Any]]) -> dict[str, Any]:
                 "paddingAll": "8px",
                 "backgroundColor": "#F4FFF7" if change > 0 else "#FFF7F7" if change < 0 else "#F8F8F8",
                 "contents": [
-                    {"type": "text", "text": stock["symbol"], "weight": "bold", "size": "md", "color": color, "flex": 2},
+                    {"type": "text", "text": stock["symbol"], "weight": "bold", "size": "md", "color": daily_color, "flex": 2},
                     {"type": "text", "text": stock["name"], "size": "sm", "color": "#111111", "flex": 3},
                     {"type": "text", "text": f"USD {fmt_num(quote_price(quote))}", "size": "sm", "align": "end", "flex": 3},
-                    {"type": "text", "text": fmt_pct(quote.get("regularMarketChangePercent")), "size": "sm", "align": "end", "color": color, "flex": 2},
-                    {"type": "text", "text": arrow, "size": "xl", "align": "end", "color": color, "flex": 1},
+                    {"type": "text", "text": fmt_pct(quote.get("regularMarketChangePercent")), "size": "sm", "align": "end", "color": daily_color, "flex": 2},
+                    {"type": "text", "text": f"{arrow} {fmt_pct(five_day_pct)}", "size": "sm", "align": "end", "color": trend_color, "flex": 2},
                 ],
             }
         )
@@ -635,7 +657,7 @@ def build_flex_message(quotes: dict[str, dict[str, Any]]) -> dict[str, Any]:
                 "spacing": "md",
                 "contents": [
                     {"type": "text", "text": "美股漲跌概覽", "weight": "bold", "size": "xxl", "align": "center"},
-                    {"type": "text", "text": "依最新報價快照", "size": "sm", "color": "#666666", "align": "center"},
+                    {"type": "text", "text": "依最近交易日收盤；右欄為5日漲幅", "size": "sm", "color": "#666666", "align": "center"},
                     {"type": "separator", "margin": "md"},
                     *rows,
                     {"type": "separator", "margin": "md"},
@@ -646,16 +668,88 @@ def build_flex_message(quotes: dict[str, dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def stock_chinese_name(stock: dict[str, str]) -> str:
+    return stock.get("zh_name") or stock["name"]
+
+
+def has_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+def strip_news_source_suffix(title: str) -> str:
+    if " - " not in title:
+        return title.strip()
+    return title.rsplit(" - ", 1)[0].strip()
+
+
+def normalize_chinese_news_title(title: str) -> str:
+    replacements = (
+        ("TSMC", "台積電"),
+        ("NVIDIA", "輝達"),
+        ("NVDA", "輝達"),
+        ("MICRON", "美光"),
+        ("AMD", "超微"),
+        ("AAPL", "蘋果"),
+        ("AVGO", "博通"),
+        ("ORCL", "甲骨文"),
+        ("TSLA", "特斯拉"),
+        ("META", "臉書母公司"),
+        ("ASIC", "特殊應用積體電路"),
+        ("NAND", "快閃記憶體"),
+        ("EPS", "每股盈餘"),
+        ("ESP", "每股盈餘預估"),
+        ("ETF", "指數股票型基金"),
+        ("AI", "人工智慧"),
+        ("PO", "發布"),
+    )
+    normalized = title
+    for old, new in replacements:
+        normalized = re.sub(re.escape(old), new, normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"Q([1-4])", lambda match: f"第{match.group(1)}季", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"^\d{4}(?:\.(?:TW|TWO))?\s+", "", normalized)
+    normalized = re.sub(r"\((?:[A-Z]{1,6}|\d{4}(?:\.(?:TW|TWO))?)\)", "", normalized)
+    normalized = re.sub(r"[A-Za-z]+", "", normalized)
+    normalized = re.sub(r"[^\w\s\u4e00-\u9fff，。！？、：；（）《》「」『』【】／/\-+.%]", "", normalized)
+    normalized = normalized.replace("蘋果蘋果", "蘋果")
+    normalized = normalized.replace("-最新", "最新")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def infer_news_topics(title: str) -> str:
+    lower = title.lower()
+    topics: list[str] = []
+    checks = (
+        ("每股盈餘", ("eps", "esp", "每股盈餘")),
+        ("財報", ("earnings", "earning", "results", "財報", "法說")),
+        ("營收", ("revenue", "sales", "營收")),
+        ("展望", ("outlook", "guidance", "forecast", "展望", "財測")),
+        ("獲利", ("profit", "獲利")),
+    )
+    for label, keywords in checks:
+        if any(keyword in lower for keyword in keywords):
+            topics.append(label)
+    if not topics:
+        topics.append("營運展望")
+    return "、".join(dict.fromkeys(topics))
+
+
+def chinese_news_title(stock: dict[str, str], item: NewsItem) -> str:
+    title = strip_news_source_suffix(item.title)
+    if has_cjk(title):
+        return short_text(normalize_chinese_news_title(title), 84)
+    return f"{stock_chinese_name(stock)}：{infer_news_topics(title)}相關報導"
+
+
 def stock_news_lines(stock: dict[str, str], news: dict[str, list[NewsItem]]) -> list[str]:
     items = news.get(stock["symbol"]) or news.get(stock["yahoo"]) or []
     if not items:
         return []
 
-    lines = [f"{stock['symbol']} {stock['name']}"]
+    lines = [f"{stock['symbol']} {stock_chinese_name(stock)}"]
     for item in items:
-        source = f" - {item.source}" if item.source else ""
         link = item.short_link or item.link
-        lines.append(f"- {short_text(item.title, 84)}{source}")
+        lines.append(f"- {chinese_news_title(stock, item)}")
         lines.append(link)
     return lines
 
@@ -669,8 +763,8 @@ def build_text_digest(
     today = now_taipei().strftime("%Y-%m-%d")
     footer = f"本月LINE訊息: {estimated_usage_after_send} / {display_limit}"
     lines = [
-        f"ESP/營收/展望新聞 {today}",
-        "範圍: 最近2天內相關新聞；無符合條件的股票已省略。",
+        f"每股盈餘/營收/展望新聞 {today}",
+        "範圍: 最近2天內相關新聞；標題以中文顯示，無符合條件的股票已省略。",
         "",
     ]
     added_any = False
@@ -702,7 +796,7 @@ def build_text_digest(
         lines.append("")
     add_stock_group(TW_STOCKS)
     if not added_any:
-        lines.append("近2天未見 ESP/EPS、營收、展望相關新聞。")
+        lines.append("近2天未見每股盈餘、營收、展望相關新聞。")
     lines.extend(["", footer])
     return "\n".join(lines)[:5000]
 
