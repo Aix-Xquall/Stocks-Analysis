@@ -65,7 +65,7 @@ US_STOCKS = [
 US_OVERVIEW_EXTRA_STOCKS = [
     {"symbol": "MRVL", "name": "Marvell", "zh_name": "邁威爾", "yahoo": "MRVL"},
     {"symbol": "RKLB", "name": "Rocket Lab", "zh_name": "火箭實驗室", "yahoo": "RKLB"},
-    {"symbol": "VCX", "name": "VCX Fund", "zh_name": "Fundrise成長科技基金", "yahoo": "VCX"},
+    {"symbol": "VCX", "name": "Innovation", "zh_name": "Fundrise Innovation", "yahoo": "VCX"},
 ]
 
 US_OVERVIEW_STOCKS = [*US_STOCKS, *US_OVERVIEW_EXTRA_STOCKS]

@@ -4,7 +4,7 @@ This repository sends a LINE stock digest from GitHub Actions every Monday to Sa
 
 ## What It Sends
 
-1. A US stock overview image for `NVDA`, `TSM`, `MU`, `GOOGL`, `AVGO`, `ORCL`, `TSLA`, `META`, `MRVL`, `RKLB`, and `VCX`.
+1. A US stock overview image for `NVDA`, `TSM`, `MU`, `GOOGL`, `AVGO`, `ORCL`, `TSLA`, `META`, `MRVL`, `RKLB`, and `VCX` (Fundrise Innovation).
 2. A text digest listing only the last two days of ESP/EPS, revenue, outlook, guidance, earnings, or investor conference news for the original US news watchlist plus `2330.TW`, `2454.TW`, `2308.TW`, `8299.TWO`, `2408.TW`, `3260.TWO`, `2368.TW`, and `2327.TW`. Tickers with no matching recent news are omitted.
 
 The script checks LINE monthly usage before sending. If the current month is already at `198 / 200`, or sending two more messages would exceed `198`, it stops and waits for LINE's monthly counter to reset.
