@@ -62,6 +62,14 @@ US_STOCKS = [
     {"symbol": "META", "name": "Meta", "zh_name": "臉書母公司", "yahoo": "META"},
 ]
 
+US_OVERVIEW_EXTRA_STOCKS = [
+    {"symbol": "MRVL", "name": "Marvell", "zh_name": "邁威爾", "yahoo": "MRVL"},
+    {"symbol": "RKLB", "name": "Rocket Lab", "zh_name": "火箭實驗室", "yahoo": "RKLB"},
+    {"symbol": "VCX", "name": "VCX Fund", "zh_name": "Fundrise成長科技基金", "yahoo": "VCX"},
+]
+
+US_OVERVIEW_STOCKS = [*US_STOCKS, *US_OVERVIEW_EXTRA_STOCKS]
+
 TW_STOCKS = [
     {"symbol": "2330.TW", "name": "台積電", "yahoo": "2330.TW"},
     {"symbol": "2454.TW", "name": "聯發科", "yahoo": "2454.TW"},
@@ -168,6 +176,18 @@ def quote_price(quote: dict[str, Any]) -> float | None:
 
 def quote_five_day_pct(quote: dict[str, Any]) -> float | None:
     return to_float(quote.get("fiveDayChangePercent"))
+
+
+def quote_symbols() -> list[str]:
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for stock in [*US_OVERVIEW_STOCKS, *TW_STOCKS]:
+        symbol = stock["yahoo"]
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        symbols.append(symbol)
+    return symbols
 
 
 def market_time_utc(quotes: list[dict[str, Any]]) -> dt.datetime | None:
@@ -475,7 +495,7 @@ def generate_us_overview_image(
     row_h = 116
     gap = 14
     top = 255
-    height = top + len(US_STOCKS) * (row_h + gap) + 90
+    height = top + len(US_OVERVIEW_STOCKS) * (row_h + gap) + 90
 
     image = Image.new("RGB", (width, height), "#ffffff")
     draw = ImageDraw.Draw(image)
@@ -502,7 +522,7 @@ def generate_us_overview_image(
     for label, x in headers:
         draw.text((x, 190), label, font=header_font, fill="#111111")
 
-    for idx, stock in enumerate(US_STOCKS):
+    for idx, stock in enumerate(US_OVERVIEW_STOCKS):
         y = top + idx * (row_h + gap)
         quote = quotes.get(stock["yahoo"], {})
         change = quote_change(quote)
@@ -551,7 +571,7 @@ def generate_us_overview_image(
         draw.text((972, y + 20), arrow, font=trend_font, fill=trend_color)
         draw.text((1034, y + 38), fmt_pct(five_day_pct), font=header_font, fill=trend_color)
 
-    utc_time = market_time_utc([quotes.get(s["yahoo"], {}) for s in US_STOCKS])
+    utc_time = market_time_utc([quotes.get(s["yahoo"], {}) for s in US_OVERVIEW_STOCKS])
     time_text = utc_time.strftime("%Y-%m-%d %H:%M UTC") if utc_time else "N/A"
     draw_centered(draw, (width // 2, height - 55), f"資料時間：{time_text}", footer_font, "#666b73")
 
@@ -620,7 +640,7 @@ def build_image_message(image_url: str) -> dict[str, Any]:
 
 def build_flex_message(quotes: dict[str, dict[str, Any]]) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
-    for stock in US_STOCKS:
+    for stock in US_OVERVIEW_STOCKS:
         quote = quotes.get(stock["yahoo"], {})
         change = quote_change(quote)
         daily_color = "#07843B" if change > 0 else "#C80B12" if change < 0 else "#666666"
@@ -643,7 +663,7 @@ def build_flex_message(quotes: dict[str, dict[str, Any]]) -> dict[str, Any]:
             }
         )
 
-    utc_time = market_time_utc([quotes.get(s["yahoo"], {}) for s in US_STOCKS])
+    utc_time = market_time_utc([quotes.get(s["yahoo"], {}) for s in US_OVERVIEW_STOCKS])
     time_text = utc_time.strftime("%Y-%m-%d %H:%M UTC") if utc_time else "N/A"
     return {
         "type": "flex",
@@ -826,7 +846,7 @@ def main() -> int:
     display_limit = int(os.environ.get("LINE_MONTHLY_DISPLAY_LIMIT", "200"))
     lookback_days = int(os.environ.get("NEWS_LOOKBACK_DAYS", "2"))
 
-    symbols = [stock["yahoo"] for stock in [*US_STOCKS, *TW_STOCKS]]
+    symbols = quote_symbols()
     print("Fetching quotes...")
     quotes = fetch_yahoo_quotes(symbols)
     print(f"Fetched {len(quotes)} quote rows.")
