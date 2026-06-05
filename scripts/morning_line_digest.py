@@ -65,7 +65,7 @@ US_STOCKS = [
 US_OVERVIEW_EXTRA_STOCKS = [
     {"symbol": "MRVL", "name": "Marvell", "zh_name": "邁威爾", "yahoo": "MRVL"},
     {"symbol": "RKLB", "name": "Rocket Lab", "zh_name": "火箭實驗室", "yahoo": "RKLB"},
-    {"symbol": "VCX", "name": "Innovation", "zh_name": "Fundrise Innovation", "yahoo": "VCX"},
+    {"symbol": "VCX", "name": "Fundrise Innovation Fund", "zh_name": "Fundrise Innovation Fund", "yahoo": "VCX"},
 ]
 
 US_OVERVIEW_STOCKS = [*US_STOCKS, *US_OVERVIEW_EXTRA_STOCKS]
@@ -487,6 +487,67 @@ def draw_centered(draw: ImageDraw.ImageDraw, xy: tuple[int, int], text: str, fon
     draw.text((x - (box[2] - box[0]) / 2, y), text, font=font, fill=fill)
 
 
+def draw_fit_text(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    *,
+    max_width: int,
+    font_size: int,
+    min_size: int,
+    fill: str,
+    bold: bool = True,
+) -> None:
+    size = font_size
+    while size > min_size:
+        font = load_font(size, bold=bold)
+        box = draw.textbbox((0, 0), text, font=font)
+        if box[2] - box[0] <= max_width:
+            draw.text(xy, text, font=font, fill=fill)
+            return
+        size -= 2
+
+    font = load_font(min_size, bold=bold)
+    fitted = text
+    while fitted:
+        candidate = fitted.rstrip() + "…"
+        box = draw.textbbox((0, 0), candidate, font=font)
+        if box[2] - box[0] <= max_width:
+            draw.text(xy, candidate, font=font, fill=fill)
+            return
+        fitted = fitted[:-1]
+    draw.text(xy, "…", font=font, fill=fill)
+
+
+def draw_company_name(draw: ImageDraw.ImageDraw, xy: tuple[int, int], text: str, *, max_width: int, fill: str) -> None:
+    font = load_font(34, bold=True)
+    box = draw.textbbox((0, 0), text, font=font)
+    if box[2] - box[0] <= max_width:
+        draw.text(xy, text, font=font, fill=fill)
+        return
+
+    words = text.split()
+    if len(words) > 1:
+        for size in range(24, 17, -2):
+            wrapped_font = load_font(size, bold=True)
+            candidates: list[tuple[int, str, str]] = []
+            for split_at in range(1, len(words)):
+                first = " ".join(words[:split_at])
+                second = " ".join(words[split_at:])
+                first_width = draw.textbbox((0, 0), first, font=wrapped_font)[2]
+                second_width = draw.textbbox((0, 0), second, font=wrapped_font)[2]
+                widest = max(first_width, second_width)
+                if widest <= max_width:
+                    candidates.append((widest, first, second))
+            if candidates:
+                _, first, second = min(candidates, key=lambda item: item[0])
+                draw.text((xy[0], xy[1] - 10), first, font=wrapped_font, fill=fill)
+                draw.text((xy[0], xy[1] + 18), second, font=wrapped_font, fill=fill)
+                return
+
+    draw_fit_text(draw, xy, text, max_width=max_width, font_size=34, min_size=20, fill=fill)
+
+
 def generate_us_overview_image(
     quotes: dict[str, dict[str, Any]],
     output_path: Path,
@@ -564,7 +625,13 @@ def generate_us_overview_image(
             width=1,
         )
         draw.text((48, y + 32), stock["symbol"], font=code_font, fill=color)
-        draw.text((222, y + 35), stock["name"], font=body_font, fill="#15191f")
+        draw_company_name(
+            draw,
+            (222, y + 35),
+            stock["name"],
+            max_width=185,
+            fill="#15191f",
+        )
         draw.text((415, y + 35), f"USD {fmt_num(price)}", font=body_font, fill="#15191f")
         draw.text((650, y + 35), fmt_num(change, sign=True), font=body_font, fill=color)
         draw.text((820, y + 35), fmt_pct(pct), font=body_font, fill=color)
